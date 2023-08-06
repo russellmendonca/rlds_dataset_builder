@@ -5,9 +5,9 @@ import numpy as np
 import tensorflow as tf
 import tensorflow_datasets as tfds
 import tensorflow_hub as hub
+from PIL import Image
 
-
-class ExampleDataset(tfds.core.GeneratorBasedBuilder):
+class CMUFrankaExploration(tfds.core.GeneratorBasedBuilder):
     """DatasetBuilder for example dataset."""
 
     VERSION = tfds.core.Version('1.0.0')
@@ -23,7 +23,7 @@ class ExampleDataset(tfds.core.GeneratorBasedBuilder):
         """Dataset metadata (homepage, citation,...)."""
         return self.dataset_info_from_configs(
             features=tfds.features.FeaturesDict({
-                'steps': tfds.features.Dataset({
+                'steps': tfds.features.Dataset( {
                     'observation': tfds.features.FeaturesDict({
                         'image': tfds.features.Image(
                             shape=(64, 64, 3),
@@ -31,24 +31,34 @@ class ExampleDataset(tfds.core.GeneratorBasedBuilder):
                             encoding_format='png',
                             doc='Main camera RGB observation.',
                         ),
-                        'wrist_image': tfds.features.Image(
-                            shape=(64, 64, 3),
+                         'highres_image': tfds.features.Image(
+                            shape=(480, 640, 3),
                             dtype=np.uint8,
                             encoding_format='png',
-                            doc='Wrist camera RGB observation.',
-                        ),
-                        'state': tfds.features.Tensor(
-                            shape=(10,),
-                            dtype=np.float32,
-                            doc='Robot state, consists of [7x robot joint angles, '
-                                '2x gripper position, 1x door opening angle].',
+                            doc='High resolution main camera observation',
                         )
+                        # 'wrist_image': tfds.features.Image(
+                        #     shape=(64, 64, 3),
+                        #     dtype=np.uint8,
+                        #     encoding_format='png',
+                        #     doc='Wrist camera RGB observation.',
+                        # ),
+                        # 'state': tfds.features.Tensor(
+                        #     shape=(10,),
+                        #     dtype=np.float32,
+                        #     doc='Robot state, consists of [7x robot joint angles, '
+                        #         '2x gripper position, 1x door opening angle].',
+                        # )
                     }),
                     'action': tfds.features.Tensor(
-                        shape=(10,),
+                        shape=(8,),
                         dtype=np.float32,
-                        doc='Robot action, consists of [7x joint velocities, '
-                            '2x gripper velocities, 1x terminate episode].',
+                        doc='Robot action, consists of [end effector position3x, end effector orientation3x, gripper action1x, episode termination1x].',
+                    ),
+                    'structured_action': tfds.features.Tensor(
+                        shape=(8,),
+                        dtype=np.float32,
+                        doc='Structured action, consisting of hybrid affordance and end-effector control, described in Structured World Models from Human Videos.',
                     ),
                     'discount': tfds.features.Scalar(
                         dtype=np.float32,
@@ -90,8 +100,8 @@ class ExampleDataset(tfds.core.GeneratorBasedBuilder):
     def _split_generators(self, dl_manager: tfds.download.DownloadManager):
         """Define data splits."""
         return {
-            'train': self._generate_examples(path='data/train/episode_*.npy'),
-            'val': self._generate_examples(path='data/val/episode_*.npy'),
+            'train': self._generate_examples(path='data/train/*.npz'),
+            # 'val': self._generate_examples(path='data/val/*.npz'),
         }
 
     def _generate_examples(self, path) -> Iterator[Tuple[str, Any]]:
@@ -101,27 +111,38 @@ class ExampleDataset(tfds.core.GeneratorBasedBuilder):
             # load raw data --> this should change for your dataset
             data = np.load(episode_path, allow_pickle=True)     # this is a list of dicts in our case
 
-            # assemble episode --> here we're assuming demos so we set reward to 1 at the end
+            lang_instruction = data['language_instruction'].tolist()
+            lang_embedding   = self._embed([lang_instruction])[0].numpy()
+            
+            #import ipdb ; ipdb.set_trace()
+           
             episode = []
-            for i, step in enumerate(data):
-                # compute Kona language embedding
-                language_embedding = self._embed([step['language_instruction']])[0].numpy()
+            ep_len = len(data['image'])
+            for i in range(ep_len):
 
-                episode.append({
+                highres_img = data['image'][i]
+                image_64x64 = np.array(Image.fromarray(highres_img).resize((64,64), Image.Resampling.LANCZOS ))
+
+                ep_dict = {
                     'observation': {
-                        'image': step['image'],
-                        'wrist_image': step['wrist_image'],
-                        'state': step['state'],
+                        'image': image_64x64,
+                        'highres_image' : highres_img
                     },
-                    'action': step['action'],
+                    'action': data['action'].astype(np.float32)[i],
+                    'structured_action': data['structured_action'].astype(np.float32)[i],
                     'discount': 1.0,
-                    'reward': float(i == (len(data) - 1)),
+                    'reward':  data['reward'].astype(np.float32)[i],
                     'is_first': i == 0,
-                    'is_last': i == (len(data) - 1),
-                    'is_terminal': i == (len(data) - 1),
-                    'language_instruction': step['language_instruction'],
-                    'language_embedding': language_embedding,
-                })
+                    'is_last': i == (ep_len - 1),
+                    'is_terminal': i == (ep_len - 1),
+                    'language_instruction': lang_instruction,
+                    'language_embedding': lang_embedding,
+                }
+                # if 'image_view2' in data:
+                #     ep_dict['observation']['highres_image_view2'] = data['image_view2'][i]
+
+
+                episode.append(ep_dict)
 
             # create output data sample
             sample = {
